@@ -1,0 +1,755 @@
+---
+title: "ChIP_song_2"
+output: html_document
+---
+
+#Here I made the regulatory network of the Song paper data using the pc-Hi-C and ATAC-seq data. In this document I also make the 20kb up&downstream promoter file based on the genome file. line 8 till 309 is how I make the regulatory maps. After that comes the burden testing with these regulatory maps and the visualization
+
+#select the variants that only contain a min of 1 read and a min score of 5 (on HPC)
+```{bash}
+zcat astrocyte.ibed.txt.gz | awk '{ if ( $9>=1 && $10 >=5) print $0;}' | gzip > ChIP_astro_selected.txt.gz 
+```
+
+##environment
+```{r}
+library(tidyverse)
+library(rtracklayer)
+library(dplyr)
+library(tidyr)
+```
+
+```{bash}
+#select the variants that only contain a min of 1 read and a min score of 5 (on cluster)
+zcat astrocyte.ibed.txt.gz | awk '{ if ( $9>=1 && $10 >=5) print $0;}' | gzip > ChIP_astro_selected.txt.gz 
+```
+
+## load pc-Hi-C data into R environment
+```{r}
+#load data into R environment
+read.table("/Users/charlotte/Documents/Major research project/Geneburden_songdata/ChIPseq_Songdata/ChIP_astro_selected.txt", h=T)->ChIP_astro_selected
+read.table("/Users/charlotte/Documents/Major research project/Geneburden_songdata/ChIPseq_Songdata/ChIP_cort_selected.txt", h=T)->ChIP_cort_selected
+read.table("/Users/charlotte/Documents/Major research project/Geneburden_songdata/ChIPseq_Songdata/ChIP_hippo_selected.txt", h=T)->ChIP_hippo_selected
+read.table("/Users/charlotte/Documents/Major research project/Geneburden_songdata/ChIPseq_Songdata/ChIP_motor_selected.txt", h=T)->ChIP_motor_selected
+```
+
+#Make the 20 kb promototer file
+```{r}
+#Load gene file into R environment
+GTFfile<-'/Users/charlotte/Documents/Major research project/Challenge1//Homo_sapiens.GRCh37.75.gtf.gz'
+import(GTFfile) -> GeneDiscription.gft
+as.data.frame(GeneDiscription.gft)->GeneDiscription.df
+GeneDiscription.gft[which(GeneDiscription.gft$gene_name == "5S_rRNA"),] 
+
+#select only the lines where type=gene
+typename=c('gene')
+GeneDiscription1.gft <- GeneDiscription.gft %>%
+  subset(type %in% typename)
+sourcename=c('protein_coding')
+GeneDiscription1.gft <- GeneDiscription1.gft %>%
+  subset(source %in% sourcename)
+
+##add 10 kb up and downstream of start of the gene. Do this seperate for the minus and plus strand. 
+#min strands
+X<-c('-')
+Gene_min <- GeneDiscription1.gft %>%
+  subset(strand %in% X)
+as.data.frame(Gene_min)->Gene_min.df
+Gene_min.df1 <- Gene_min.df %>%
+  rename(start='start1',end='start')
+Gene_min.df1$end=Gene_min.df1$start+10000
+
+Gene_min.df <- Gene_min.df1 %>%
+  dplyr::select(seqnames, start, end, width, strand, source, type, score, phase, gene_id, gene_name, gene_source, gene_biotype, transcript_id, transcript_name, transcript_source, exon_number, exon_id, tag, ccds_id, protein_id)
+
+Gene_min_extended.df <- Gene_min.df
+Gene_min_extended.df$start <- Gene_min_extended.df$start-10000
+
+Gene_min_extended.df$width<-Gene_min_extended.df$end - Gene_min_extended.df$start
+
+#plusstrands
+X<-c('+')
+Gene_plus<-GeneDiscription1.gft %>%
+  subset(strand %in% X)
+as.data.frame(Gene_plus)->Gene_plus.df
+Gene_plus.df1 <- Gene_plus.df %>% rename(end='end1', start='end')
+
+Gene_plus.df1$start=Gene_plus.df1$end-10000
+Gene_plus.df <- Gene_plus.df1 %>%
+  dplyr::select(seqnames, start, end, width, strand, source, type, score, phase, gene_id, gene_name, gene_source, gene_biotype, transcript_id, transcript_name, transcript_source, exon_number, exon_id, tag, ccds_id, protein_id)
+
+Gene_plus_extended.df<-Gene_plus.df
+Gene_plus_extended.df$end<-Gene_plus_extended.df$end+10000
+Gene_plus_extended.df$width<-Gene_plus_extended.df$end - Gene_plus_extended.df$start
+
+#make the data of the newly created columns into integers
+as.integer(Gene_plus.df$start)->Gene_plus.df$start
+as.integer(Gene_min.df$end)->Gene_min.df$end
+as.integer(Gene_plus_extended.df$end)->Gene_plus_extended.df$end
+as.integer(Gene_min_extended.df$start)->Gene_min_extended.df$start
+as.integer(Gene_min_extended.df$width)->Gene_min_extended.df$width
+as.integer(Gene_plus_extended.df$width)->Gene_plus_extended.df$width
+
+#combine the plus and minus strand and sort the files
+dplyr::bind_rows(Gene_plus_extended.df, Gene_min_extended.df)->promoter20kb.df
+makeGRangesFromDataFrame(promoter20kb.df, keep.extra.columns = TRUE)->promoter20kb.GR
+sort(promoter20kb.GR, by = ~ seqnames + start + end)->promoter20kb.GR
+as.data.frame(promoter20kb.GR)->promoter20kb.df
+
+
+#Select only the columns that contain relevant information about the promotor
+promoter20kb.selected.df <- promoter20kb.df %>% 
+  dplyr::select(seqnames, start, end, width, strand, gene_name)
+makeGRangesFromDataFrame(promoter20kb.selected.df, keep.extra.columns = TRUE)->promoter20kb.selected.GR
+```
+
+##ATACseq data
+```{r}
+#import atac-seq data (already annotated for peakID) 
+read.table("/Users/charlotte/Documents/Major research project/Geneburden_songdata/ChIPseq_Songdata/ATACpeaks_annotated/motor.ns.bed")->motor.ns.bed
+read.table("/Users/charlotte/Documents/Major research project/Geneburden_songdata/ChIPseq_Songdata/ATACpeaks_annotated/cortical.ns.bed")->cort.ns.bed
+read.table("/Users/charlotte/Documents/Major research project/Geneburden_songdata/ChIPseq_Songdata/ATACpeaks_annotated/hippocampal.ns.bed")->hippo.ns.bed
+read.table("/Users/charlotte/Documents/Major research project/Geneburden_songdata/ChIPseq_Songdata/ATACpeaks_annotated/astrocyte.ns.bed")->astro.ns.bed
+
+# Select usefull columns and make the names/columns compatable with those of the Hi-C data
+ATACcols=function(df)
+{
+  output=df %>% dplyr::select(V1, V2, V3) %>% dplyr::rename(start='V2', stop='V3', seqnames='V1')->df; print(df)
+}
+ATACcols(motor.ns.bed)->motor.ns.bed
+ATACcols(astro.ns.bed)->astro.ns.bed
+ATACcols(hippo.ns.bed)->hippo.ns.bed
+ATACcols(cort.ns.bed)->cort.ns.bed
+
+#make granges outof the dataframes
+makeGRangesFromDataFrame(motor.ns.bed)->motor.ATAC.GR
+makeGRangesFromDataFrame(cort.ns.bed)->cort.ATAC.GR
+makeGRangesFromDataFrame(hippo.ns.bed)->hippo.ATAC.GR
+makeGRangesFromDataFrame(astro.ns.bed)->astro.ATAC.GR
+```
+
+##pc-HiC data
+#find the active promoters by first making a file of the HiC data  that contains only the information of the promoters. Then intersect this with the ATAC-seq data.  
+```{r}
+#select relevant columns and rename and make compatible for intersect.
+HiCcols=function(df)
+{
+  output=df %>% dplyr::select(bait_chr,bait_start,bait_end,otherEnd_chr,otherEnd_start,otherEnd_end) %>% dplyr::rename(seqnames='bait_chr', start='bait_start', end='bait_end')->df; gsub('chr','', df$seqnames)->df$seqnames; print(df)
+}
+HiCcols(ChIP_motor_selected)->chip_motor_baits
+HiCcols(ChIP_astro_selected)->chip_astro_baits
+HiCcols(ChIP_hippo_selected)->chip_hippo_baits
+HiCcols(ChIP_cort_selected)->chip_cort_baits
+
+#Make Granges
+makeGRangesFromDataFrame(chip_motor_baits, keep.extra.columns = TRUE)->chip_motor_baits.GR
+makeGRangesFromDataFrame(chip_astro_baits, keep.extra.columns = TRUE)->chip_astro_baits.GR
+makeGRangesFromDataFrame(chip_hippo_baits, keep.extra.columns = TRUE)->chip_hippo_baits.GR
+makeGRangesFromDataFrame(chip_cort_baits, keep.extra.columns = TRUE)->chip_cort_baits.GR
+```
+
+#see how much the 20kb promoter file overlaps with the promoter columns of the HiC data
+```{r}
+##intersect promotor regions with bait regions
+intersect(chip_motor_baits.GR, promoter20kb.selected.GR, ignore.strand=TRUE)->overlappingProms # 81436 to 12700(~16%)
+subsetByOverlaps(chip_motor_baits.GR, promoter20kb.selected.GR)->overlappingProms2#81436 to 69883 #86% overlaps 
+```
+
+#annotate the promoters to a gene by overlapping them with te 20kb promoter file.
+```{r}
+#Function that overlaps the promoter columns with the 20 kb promoter file. The 20 kb promoters are kept. The original 'promoter' (e.g. the baits) are saved under 'seqnames1', 'start1', and 'end1' so we can merge the intersected dataframe with the original to get a file that is annotated, but with all the capture regions with it and the 20 kb promoter region. 
+
+CharlottesIntersect=function(grange1, grange2)
+  {
+  output=findOverlaps(grange1, grange2)->Y; grange1[queryHits(Y)]->one; grange2[subjectHits(Y)]->two; two$otherEnd_chr->one$otherEnd_chr;  two$otherEnd_start->one$otherEnd_start; two$otherEnd_end->one$otherEnd_end; as.data.frame(one)->one; as.data.frame(two)->two; two$seqnames->one$seqnames1; two$start->one$start1; two$end->one$end1; print(one)
+}
+
+#MOTER
+CharlottesIntersect(promoter20kb.selected.GR, chip_motor_baits.GR )->one_motor 
+chip_motor_baits %>% rename(seqnames1="seqnames", start1="start", end1="end")->chip_motor_total_formerge
+left_join(chip_motor_total_formerge, one_motor, by=c("seqnames1", "start1", "end1"))->C
+C %>% dplyr::select(seqnames, start, end, width, strand, gene_name, otherEnd_chr.x,otherEnd_start.x, otherEnd_end.x)->B
+unique(B)->chip_motor_total.df  ## 81436 to 121,978 rows
+na.omit(chip_motor_total.df)->chip_motor_total.df
+
+#ASTRO
+CharlottesIntersect(promoter20kb.selected.GR, chip_astro_baits.GR) -> one_astro
+chip_astro_baits %>% rename(seqnames1="seqnames", start1="start", end1="end")->chip_astro_total_formerge
+left_join(chip_astro_total_formerge, one_astro, by=c("seqnames1", "start1", "end1"))->C
+C %>% dplyr::select(seqnames, start, end, width, strand, gene_name, otherEnd_chr.x,otherEnd_start.x, otherEnd_end.x)->B
+unique(B)->chip_astro_total.df ## from 101634 to 147473
+na.omit(chip_astro_total.df)->chip_astro_total.df
+
+#HIPPO
+CharlottesIntersect(promoter20kb.selected.GR,chip_hippo_baits.GR) ->one_hippo
+chip_hippo_baits %>% rename(seqnames1="seqnames", start1="start", end1="end")->chip_hippo_total_formerge
+left_join(chip_hippo_total_formerge, one_hippo, by=c("seqnames1", "start1", "end1"))->C
+C %>% dplyr::select(seqnames, start, end, width, strand, gene_name, otherEnd_chr.x,otherEnd_start.x, otherEnd_end.x)->B
+unique(B)->chip_hippo_total.df #128343 to 187870
+na.omit(chip_hippo_total.df)->chip_hippo_total.df
+
+#CORT
+CharlottesIntersect(promoter20kb.selected.GR, chip_cort_baits.GR) ->one_cort
+chip_cort_baits %>% rename(seqnames1="seqnames", start1="start", end1="end")->chip_cort_total_formerge
+left_join(chip_cort_total_formerge, one_cort, by=c("seqnames1", "start1", "end1"))->C
+C %>% dplyr::select(seqnames, start, end, width, strand, gene_name, otherEnd_chr.x,otherEnd_start.x, otherEnd_end.x)->B
+unique(B)->chip_cort_total.df  #89527 to 158815
+na.omit(chip_cort_total.df)->chip_cort_total.df
+```
+
+#sort and rename colnames
+```{r}
+#MOTOR
+as.integer(chip_motor_total.df$seqnames)->chip_motor_total.df$seqnames
+chip_motor_total.df <- chip_motor_total.df[order(chip_motor_total.df$seqnames, chip_motor_total.df$start),]
+row.names(chip_motor_total.df)<-c(1: 113284) 
+chip_motor_total.df %>% rename(seqnames_otherend="otherEnd_chr.x", start_otherend="otherEnd_start.x", end_otherend="otherEnd_end.x")->chip_motor_total.df
+#ASTRO
+as.integer(chip_astro_total.df$seqnames)->chip_astro_total.df$seqnames
+chip_astro_total.df <- chip_astro_total.df[order(chip_astro_total.df$seqnames, chip_astro_total.df$start),]
+row.names(chip_astro_total.df)<-c(1:136851 )
+chip_astro_total.df %>% rename(seqnames_otherend="otherEnd_chr.x", start_otherend="otherEnd_start.x", end_otherend="otherEnd_end.x")->chip_astro_total.df
+#HIPPO
+as.integer(chip_hippo_total.df$seqnames)->chip_hippo_total.df$seqnames
+chip_hippo_total.df <- chip_hippo_total.df[order(chip_hippo_total.df$seqnames, chip_hippo_total.df$start),]
+row.names(chip_hippo_total.df)<-c(1: 173135)
+chip_hippo_total.df %>% rename(seqnames_otherend="otherEnd_chr.x", start_otherend="otherEnd_start.x", end_otherend="otherEnd_end.x")->chip_hippo_total.df
+#CORT
+as.integer(chip_cort_total.df$seqnames)->chip_cort_total.df$seqnames
+chip_cort_total.df <- chip_cort_total.df[order(chip_cort_total.df$seqnames, chip_cort_total.df$start),]
+row.names(chip_cort_total.df)<-c(1:125230)
+chip_cort_total.df %>% rename(seqnames_otherend="otherEnd_chr.x", start_otherend="otherEnd_start.x", end_otherend="otherEnd_end.x")->chip_cort_total.df
+```
+
+#take the columns of the regions that bind the promoters (i.e. possible enhancers)
+```{r}
+#MOTOR
+chip_motor_total.df %>% dplyr::select(seqnames_otherend, start_otherend, end_otherend, gene_name)->chip_motor_baits
+chip_motor_baits <- chip_motor_baits %>% rename(seqnames="seqnames_otherend", start="start_otherend", end="end_otherend") 
+chip_motor_baits$seqnames<-gsub("chr", "",chip_motor_baits$seqnames)
+#ASTRO
+chip_astro_total.df %>% dplyr::select(seqnames_otherend, start_otherend, end_otherend, gene_name)->chip_astro_baits
+chip_astro_baits <- chip_astro_baits %>% rename(seqnames="seqnames_otherend", start="start_otherend", end="end_otherend") 
+chip_astro_baits$seqnames<-gsub("chr", "",chip_astro_baits$seqnames)
+#HIPPO
+chip_hippo_total.df %>% dplyr::select(seqnames_otherend, start_otherend, end_otherend, gene_name)->chip_hippo_baits
+chip_hippo_baits <- chip_hippo_baits %>% rename(seqnames="seqnames_otherend", start="start_otherend", end="end_otherend") 
+chip_hippo_baits$seqnames<-gsub("chr", "",chip_hippo_baits$seqnames)
+#CORT
+chip_cort_total.df %>% dplyr::select(seqnames_otherend, start_otherend, end_otherend, gene_name)->chip_cort_baits
+chip_cort_baits <- chip_cort_baits %>% rename(seqnames="seqnames_otherend", start="start_otherend", end="end_otherend") 
+chip_cort_baits$seqnames<-gsub("chr", "",chip_cort_baits$seqnames)
+
+#make into GRanges
+makeGRangesFromDataFrame(chip_motor_baits, keep.extra.columns = TRUE)->chip_motor_baits.GR
+makeGRangesFromDataFrame(chip_astro_baits, keep.extra.columns = TRUE)->chip_astro_baits.GR
+makeGRangesFromDataFrame(chip_hippo_baits, keep.extra.columns = TRUE)->chip_hippo_baits.GR
+makeGRangesFromDataFrame(chip_cort_baits, keep.extra.columns = TRUE)->chip_cort_baits.GR
+```
+
+#find the active enhancers
+```{r}
+CharlottesIntersect2=function(grange1,grange2)
+{
+  output=findOverlaps(grange1, grange2)->Y; grange1[queryHits(Y)]->one; one$type<-"enhancer"; as.data.frame(one)->one; unique(one)->one; one <- one[order(one$seqnames, one$start),];  nrow(one)->C; P<-c(1:C); row.names(one)<-P;  print(one)
+}
+CharlottesIntersect2(chip_motor_baits.GR, motor.ATAC.GR)->motor_active_enhancers #from 112928 to 41219 unique rows (37%)
+CharlottesIntersect2(chip_astro_baits.GR, astro.ATAC.GR)->astro_active_enhancers #from 136533 to 45355 unique rows (33%)
+CharlottesIntersect2(chip_hippo_baits.GR, hippo.ATAC.GR)->hippo_active_enhancers #from  172602 to  54811  unique rows (32%)
+CharlottesIntersect2(chip_cort_baits.GR, cort.ATAC.GR)->cort_active_enhancers #from 124896 to 40421 unique rows (32%)
+
+as.data.frame(motor_active_enhancers)->motor_active_enhancers.df
+as.data.frame(astro_active_enhancers)->astro_active_enhancers.df
+as.data.frame(hippo_active_enhancers)->hippo_active_enhancers.df
+as.data.frame(cort_active_enhancers)->cort_active_enhancers.df
+```
+
+#Find the active promoters
+```{r}
+#MOTOR
+chip_motor_total.df %>% dplyr::select(seqnames, start, end, width, strand, gene_name)->chip_motor_promoters
+makeGRangesFromDataFrame(chip_motor_promoters, keep.extra.columns = TRUE)->chip_motor_promoters.GR
+#ASTRO
+chip_astro_total.df %>% dplyr::select(seqnames, start, end, width, strand, gene_name)->chip_astro_promoters
+makeGRangesFromDataFrame(chip_astro_promoters, keep.extra.columns = TRUE)->chip_astro_promoters.GR
+#HIPPO
+chip_hippo_total.df %>% dplyr::select(seqnames, start, end, width, strand, gene_name)->chip_hippo_promoters
+makeGRangesFromDataFrame(chip_hippo_promoters, keep.extra.columns = TRUE)->chip_hippo_promoters.GR
+#CORT
+chip_cort_total.df %>% dplyr::select(seqnames, start, end, width, strand, gene_name)->chip_cort_promoters
+makeGRangesFromDataFrame(chip_cort_promoters, keep.extra.columns = TRUE)->chip_cort_promoters.GR
+
+#find the active promoters
+CharlottesIntersect3=function(grange1,grange2)
+{
+  output=findOverlaps(grange1, grange2)->Y; grange1[queryHits(Y)]->one; one$type<-"promoter"; as.data.frame(one)->one; unique(one)->one; one <- one[order(one$seqnames, one$start),];  nrow(one)->C; P<-c(1:C); row.names(one)<-P;  print(one)
+}
+
+CharlottesIntersect3(chip_motor_promoters.GR, motor.ATAC.GR)->chip_motor_promoters_active #from 20897 to 16525 (79%) unique rows
+CharlottesIntersect3(chip_astro_promoters.GR, motor.ATAC.GR)->chip_astro_promoters_active #from 21066 to 16547 (79%) unique rows
+CharlottesIntersect3(chip_hippo_promoters.GR, motor.ATAC.GR)->chip_hippo_promoters_active #from 26981 to 20790 (77%) unique rows
+CharlottesIntersect3(chip_cort_promoters.GR, motor.ATAC.GR)->chip_cort_promoters_active #from 21080 to 16740 (79%) unique rows
+
+
+as.data.frame(chip_motor_promoters_active)->chip_motor_promoters_active.df
+as.data.frame(chip_astro_promoters_active)->chip_astro_promoters_active.df
+as.data.frame(chip_hippo_promoters_active)->chip_hippo_promoters_active.df
+as.data.frame(chip_cort_promoters_active)->chip_cort_promoters_active.df
+```
+
+#bind the active enhancers + active promoters as total file
+```{r}
+#MOTOR
+rbind(motor_active_enhancers.df,chip_motor_promoters_active.df)->Song_Regnetwork_motor
+makeGRangesFromDataFrame(Song_Regnetwork_motor, keep.extra.columns = TRUE) %>% sort.GenomicRanges() %>% as.data.frame()->Song_Regnetwork_motor.df
+#ASTRO
+rbind(astro_active_enhancers.df,chip_astro_promoters_active.df)->Song_Regnetwork_astro
+makeGRangesFromDataFrame(Song_Regnetwork_astro, keep.extra.columns = TRUE) %>% sort.GenomicRanges() %>% as.data.frame()->Song_Regnetwork_astro.df
+#HIPPO
+rbind(hippo_active_enhancers.df,chip_hippo_promoters_active.df)->Song_Regnetwork_hippo
+makeGRangesFromDataFrame(Song_Regnetwork_hippo, keep.extra.columns = TRUE) %>% sort.GenomicRanges() %>% as.data.frame()->Song_Regnetwork_hippo.df
+#CORT
+rbind(cort_active_enhancers.df,chip_cort_promoters_active.df)->Song_Regnetwork_cort
+makeGRangesFromDataFrame(Song_Regnetwork_cort, keep.extra.columns = TRUE) %>% sort.GenomicRanges() %>% as.data.frame()->Song_Regnetwork_cort.df
+```
+
+#narrow the regulatory network regions to only ATAC-seq peaks
+```{r}
+#first make network into granges
+makeGRangesFromDataFrame(Song_Regnetwork_motor.df, keep.extra.columns = TRUE)->Song_Regnetwork_motor.GR
+makeGRangesFromDataFrame(Song_Regnetwork_astro.df, keep.extra.columns = TRUE)->Song_Regnetwork_astro.GR
+makeGRangesFromDataFrame(Song_Regnetwork_hippo.df, keep.extra.columns = TRUE)->Song_Regnetwork_hippo.GR
+makeGRangesFromDataFrame(Song_Regnetwork_cort.df, keep.extra.columns = TRUE)->Song_Regnetwork_cort.GR
+
+#make ATAC-seq into GRanges
+makeGRangesFromDataFrame(motor.ns.bed)->motor.ns.bed.GR
+makeGRangesFromDataFrame(astro.ns.bed)->astro.ns.bed.GR
+makeGRangesFromDataFrame(hippo.ns.bed)->hippo.ns.bed.GR
+makeGRangesFromDataFrame(cort.ns.bed)->cort.ns.bed.GR
+
+#intersect with ATAC-seq and keep ATAC-seq regions and annotate them with gene_name and type from reg network
+intersectATAC=function(grange1,grange2)
+{
+  output=findOverlaps(grange1, grange2)->Y; grange1[queryHits(Y)]->one; grange2[subjectHits(Y)]->two; 
+one$gene_name<-two$gene_name; one$type<-two$type; sort.GenomicRanges(one)->one; as.data.frame(one)->one; unique(one)->one; row.names(one)<-c(1:nrow(one)); print(one)
+}
+
+intersectATAC(motor.ns.bed.GR, Song_Regnetwork_motor.GR)->Song_Regnetwork_motor_narrowed
+intersectATAC(astro.ns.bed.GR, Song_Regnetwork_astro.GR)->Song_Regnetwork_astro_narrowed
+intersectATAC(hippo.ns.bed.GR, Song_Regnetwork_hippo.GR)->Song_Regnetwork_hippo_narrowed
+intersectATAC(cort.ns.bed.GR, Song_Regnetwork_cort.GR)->Song_Regnetwork_cort_narrowed
+
+write.table(Song_Regnetwork_motor_narrowed, '~/Documents/Song_Regnetwork_motor_narrowed', sep='\t')
+write.table(Song_Regnetwork_astro_narrowed, '~/Documents/Song_Regnetwork_astro_narrowed', sep='\t')
+write.table(Song_Regnetwork_hippo_narrowed, '~/Documents/Song_Regnetwork_hippo_narrowed', sep='\t')
+write.table(Song_Regnetwork_cort_narrowed, '~/Documents/Song_Regnetwork_cort_narrowed', sep='\t')
+```
+
+#export the files
+```{r}
+#the files containing promotor + enhancers (annotated) --> export
+write.table(Song_Regnetwork_astro.df, "/Users/charlotte/Documents/Song_Regnetwork_astro", sep="\t")
+write.table(Song_Regnetwork_motor.df, "/Users/charlotte/Documents/Song_Regnetwork_motor", sep="\t")
+write.table(Song_Regnetwork_cort.df, "/Users/charlotte/Documents/Song_Regnetwork_cort", sep="\t")
+write.table(Song_Regnetwork_hippo.df, "/Users/charlotte/Documents/Song_Regnetwork_hippo", sep="\t")
+```
+
+##burden testing
+
+#prepare data for config file
+```{bash} 
+sed 's/"//g' $wrk/Song_regnetworks/Song_Regnetwork_cort | awk '{print $2, $3, $4, $7, $8}' | tail -n +2 | sed 's/ /\t/g' |bedtools sort -i | bgzip > $wrk/Song_regnetworks/Song_Regnetwork_cort.bed.gz; tabix -p bed $wrk/Song_regnetworks/Song_Regnetwork_cort.bed.gz
+sed 's/"//g' $wrk/Song_regnetworks/Song_Regnetwork_astro | awk '{print $2, $3, $4, $7, $8}' | tail -n +2 | sed 's/ /\t/g' |  bedtools sort -i | bgzip > $wrk/Song_regnetworks/Song_Regnetwork_astro.bed.gz; tabix -p bed $wrk/Song_regnetworks/Song_Regnetwork_astro.bed.gz
+sed 's/"//g' $wrk/Song_regnetworks/Song_Regnetwork_motor | awk '{print $2, $3, $4, $7, $8}' | tail -n +2 | sed 's/ /\t/g' | bedtools sort -i | bgzip > $wrk/Song_regnetworks/Song_Regnetwork_motor.bed.gz; tabix -p bed $wrk/Song_regnetworks/Song_Regnetwork_motor.bed.gz
+sed 's/"//g' $wrk/Song_regnetworks/Song_Regnetwork_hippo | awk '{print $2, $3, $4, $7, $8}' | tail -n +2 | sed 's/ /\t/g' | bedtools sort -i | bgzip > $wrk/Song_regnetworks/Song_Regnetwork_hippo.bed.gz; tabix -p bed $wrk/Song_regnetworks/Song_Regnetwork_hippo.bed.gz 
+
+
+zcat $wrk/ATACpeaks/astrocyte.ns.bed.gz | bedtools sort -i | bgzip > $wrk/ATACpeaks/astrocyte1.ns.bed.gz; tabix -p bed $wrk/ATACpeaks/astrocyte1.ns.bed.gz
+
+zcat $wrk/ATACpeaks/cortical.ns.bed.gz | bedtools sort -i | bgzip > $wrk/ATACpeaks/cortical1.ns.bed.gz; tabix -p bed $wrk/ATACpeaks/cortical1.ns.bed.gz
+
+zcat $wrk/ATACpeaks/hippocampal.ns.bed.gz | bedtools sort -i | bgzip > $wrk/ATACpeaks/hippocampal1.ns.bed.gz; tabix -p bed $wrk/ATACpeaks/hippocampal1.ns.bed.gz
+
+zcat $wrk/ATACpeaks/motor.ns.bed.gz | bedtools sort -i | bgzip > $wrk/ATACpeaks/motor1.ns.bed.gz; tabix -p bed $wrk/ATACpeaks/motor1.ns.bed.gz
+
+```
+
+#make config file
+```{bash}
+#regulatory networks
+echo -e '
+[[annotation]]
+file= "/hpc/hers_en/cvandijk/challenge3/Song_regnetworks/Song_Regnetwork_cort.bed.gz"
+names=["SongReg_cort_gene", "SongReg_cort_type"]
+columns=[4, 5]
+ops=["self", "self"]
+' > $wrk/anno/Song.reg.cort.config.toml
+
+echo -e '
+[[annotation]]
+file= "/hpc/hers_en/cvandijk/challenge3/Song_regnetworks/Song_Regnetwork_astro.bed.gz"
+names=["SongReg_astro_gene","SongReg_astro_type"]
+columns=[4, 5]
+ops=["self", "self"]
+' > $wrk/anno/Song.reg.astro.config.toml
+
+echo -e '
+[[annotation]]
+file= "/hpc/hers_en/cvandijk/challenge3/Song_regnetworks/Song_Regnetwork_motor.bed.gz"
+names=["SongReg_motor_gene","SongReg_motor_type"]
+columns=[4, 5]
+ops=["self", "self"]
+' > $wrk/anno/Song.reg.motor.config.toml
+
+echo -e '
+[[annotation]]
+file= "/hpc/hers_en/cvandijk/challenge3/Song_regnetworks/Song_Regnetwork_hippo.bed.gz"
+names=["SongReg_hippo_gene","SongReg_hippo_type "]
+columns=[4, 5]
+ops=["self", "self"]
+' > $wrk/anno/Song.reg.hippo.config.toml
+
+
+#ATACpeaks
+echo -e '
+[[annotation]]
+file= "/hpc/hers_en/cvandijk/challenge3/ATACpeaks/astrocyte1.ns.bed.gz"
+names=["SongATAC_astro"]
+columns=[4]
+ops=["self"]
+' > $wrk/anno/Song.ATAC.astro.config.toml
+
+echo -e '
+[[annotation]]
+file= "/hpc/hers_en/cvandijk/challenge3/ATACpeaks/motor1.ns.bed.gz"
+names=["SongATAC_motor"]
+columns=[4]
+ops=["self"]
+' > $wrk/anno/Song.ATAC.motor.config.toml
+
+echo -e '
+[[annotation]]
+file= "/hpc/hers_en/cvandijk/challenge3/ATACpeaks/hippocampal1.ns.bed.gz"
+names=["SongATAC_hippo"]
+columns=[4]
+ops=["self"]
+' > $wrk/anno/Song.ATAC.hippo.config.toml
+
+echo -e '
+[[annotation]]
+file= "/hpc/hers_en/cvandijk/challenge3/ATACpeaks/cortical1.ns.bed.gz"
+names=["SongATAC_cort"]
+columns=[4]
+ops=["self"]
+' > $wrk/anno/Song.ATAC.cort.config.toml
+
+#replace the not properly sorted files with the properly sorted files
+{ echo -e "##fileformat=VCFv4.2"; zcat genome.1.vcf.gz; } | gzip > genome1.1.vcf.gz ; 
+{ echo -e "##fileformat=VCFv4.2"; zcat genome.3.vcf.gz; } | gzip > genome1.3.vcf.gz ; 
+{ echo -e "##fileformat=VCFv4.2"; zcat genome.4.vcf.gz; } | gzip > genome1.4.vcf.gz ; 
+{ echo -e "##fileformat=VCFv4.2"; zcat genome.8.vcf.gz; } | gzip > genome1.8.vcf.gz ; 
+{ echo -e "##fileformat=VCFv4.2"; zcat genome.10.vcf.gz; } | gzip > genome1.10.vcf.gz ; 
+
+mv genome1.1.vcf.gz genome.1.vcf.gz
+mv genome1.3.vcf.gz genome.3.vcf.gz
+mv genome1.4.vcf.gz genome.4.vcf.gz
+mv genome1.8.vcf.gz genome.8.vcf.gz
+mv genome1.10.vcf.gz genome.10.vcf.gz
+```
+
+#upload variants to gdb
+```{bash}
+files=(Song.reg.cort.config.toml Song.reg.hippo.config.toml Song.reg.astro.config.toml Song.reg.motor.config.toml Song.ATAC.cort.config.toml Song.ATAC.hippo.config.toml Song.ATAC.astro.config.toml Song.ATAC.motor.config.toml)
+files=(Song.reg.motor.config.toml)
+prefix=genome
+wrk=/hpc/hers_en/cvandijk/challenge3
+
+n=$(ls $wrk/tmp/anno/vcf/genome.*.vcf.gz | wc -l)
+counter=4
+for file in ${files[@]}
+  do
+    echo -e "(/hpc/hers_en/kkenna/lib/vcfanno_linux64 -p 4 $wrk/anno/${file} $wrk/tmp/anno/vcf/${prefix}.\${SGE_TASK_ID}.vcf.gz | grep -e '#' -e '='|  bgzip -c > $wrk/tmp/anno/misc/${counter}.\${SGE_TASK_ID}.vcfAnnoImport.anno.vcf.gz) &> $wrk/tmp/anno/misc/${counter}.\${SGE_TASK_ID}.vcfAnnoImport.anno.log" | qsub -l "h_rt=4:00:00, h_vmem=1G" -N anno1_${counter} -o /dev/null -e /dev/null -pe threaded 4 -t 1-${n}
+    let "counter+=1"
+  done
+
+#make the info table into a real table
+for i in  {1..8}
+  do
+    num=${i}
+     for i2 in {1..11}
+       do 
+         echo -e "zcat $wrk/tmp/anno/misc/${num}.${i2}.vcfAnnoImport.anno.vcf.gz | $mconda/Rscript $rvat --vcfInfo2Table --vcf=- | sed 's/ID/VAR_id/'  > $wrk/tmp/anno/misc/${num}.${i2}.txt" | qsub -N vcfInfo2Table_${num}_${i2} -l "h_rt=48:00:00, h_vmem=1G" -o /dev/null -e /dev/null
+         let "counter+=1"
+       done
+  done 
+
+#select only var_id and info column  
+for i in {1..4}
+  do
+    num=${i}
+     for i2 in {1..11}
+       do   
+          awk '{print $3,$8,$9}' $wrk/tmp/anno/misc/${num}.${i2}.txt > $wrk/tmp/anno/misc/final_${num}.${i2} 
+       done
+  done 
+for i in {5..8}
+  do
+    num=${i}
+     for i2 in {1..11}
+       do   
+          awk '{print $3,$8,$9}' $wrk/tmp/anno/misc/${num}.${i2}.txt > $wrk/tmp/anno/misc/final_${num}.${i2} 
+       done
+  done
+  
+#rename files
+files=(SongReg_cort SongReg_hippo SongReg_astro SongReg_motor SongATAC_cort SongATAC_hippo SongATAC_astro SongATAC_motor)
+for i in {1..11}
+  do
+    mv $wrk/tmp/anno/misc/final_4.${i} $wrk/tmp/anno/misc/final_SongReg_motor.${i}
+  done
+
+#concatenate results
+files=(SongReg_cort SongReg_hippo SongReg_astro SongReg_motor SongATAC_cort SongATAC_hippo SongATAC_astro SongATAC_motor)
+
+for file in ${files[@]} 
+  do
+    cp final_${file}.1 ${file}.total.txt
+    for i in {2..11}
+      do
+        tail -n+2  final_${file}.${i} >> $wrk/tmp/anno/misc/${file}.total.txt
+      done
+  done
+   
+#make the results table tab delimitated
+for file in ${files[@]}
+  do
+   sed 's/ /\t/g' ${file}.total.txt > ${file}.total1.txt
+  done  
+
+#Put double annotated var_id's in a seperate row
+cat $wrk/tmp/anno/misc/SongReg_cort.total1.txt | awk '{print $1, $2}'|  tr ',' ' ' | awk -F" " -v OFS="\t" '{if (NF==3) {print $1, $3 "\n" $1, $2}  else {print $1, $2}}' | tr '//n' '/n' >  $wrk/tmp/anno/misc/SongReg_cort.total2.txt 
+
+cat $wrk/tmp/anno/misc/SongReg_astro.total1.txt | awk '{print $1, $2}'|  tr ',' ' ' | awk -F" " -v OFS="\t" '{if (NF==3) {print $1, $3 "\n" $1, $2}  else {print $1, $2}}' | tr '//n' '/n' > $wrk/tmp/anno/misc/SongReg_astro.total2.txt
+
+cat $wrk/tmp/anno/misc/SongReg_motor.total1.txt | awk '{print $1, $2}'|  tr ',' ' ' | awk -F" " -v OFS="\t" '{if (NF==3) {print $1, $3 "\n" $1, $2}  else {print $1, $2}}' | tr '//n' '/n' > $wrk/tmp/anno/misc/SongReg_motor.total2.txt
+
+cat $wrk/tmp/anno/misc/SongReg_hippo.total1.txt | awk '{print $1, $2}'|  tr ',' ' ' | awk -F" " -v OFS="\t" '{if (NF==3) {print $1, $3 "\n" $1, $2}  else {print $1, $2}}' | tr '//n' '/n' > $wrk/tmp/anno/misc/SongReg_hippo.total2.txt
+
+#upload to gdb
+echo -e "$mconda/Rscript $rvat --importAnno --gdb=$gdb --name=SongReg_cort --value=$wrk/tmp/anno/misc/SongReg_cort.total2.txt --skipRemap" | qsub -N importAnno_SRegCort -l "h_rt=2:00:00, h_vmem=4G" -o $wrk/SReg_cort.log -e $wrk/SReg.log
+
+echo -e "$mconda/Rscript $rvat --importAnno --gdb=$gdb --name=SongReg_hippo --value=$wrk/tmp/anno/misc/SongReg_hippo.total2.txt --skipRemap" | qsub -N importAnno_SRegHip -l "h_rt=2:00:00, h_vmem=4G" -o $wrk/LOGfiles/SReg_hip.log -e $wrk/LOGfiles/SReg_hip.log
+
+echo -e "$mconda/Rscript $rvat --importAnno --gdb=$gdb --name=SongReg_astro --value=$wrk/tmp/anno/misc/SongReg_astro.total2.txt --skipRemap" | qsub -N importAnno_SRegAs -l "h_rt=2:00:00, h_vmem=4G" -o $wrk/LOGfiles/SReg_astro.log -e $wrk/LOGfiles/SReg_astro.log
+
+echo -e "$mconda/Rscript $rvat --importAnno --gdb=$gdb --name=SongReg_motor --value=$wrk/tmp/anno/misc/SongReg_motor.total2.txt --skipRemap" | qsub -N importAnno_SRegMot -l "h_rt=2:00:00, h_vmem=4G" -o $wrk/LOGfiles/SReg_mot.log -e $wrk/LOGfiles/SReg_mot.log
+
+echo -e "$mconda/Rscript $rvat --importAnno --gdb=$gdb --name=SongATAC_cort --value=$wrk/tmp/anno/misc/SongATAC_cort.total1.txt --skipRemap" | qsub -N importAnno_SATACcort -l "h_rt=2:00:00, h_vmem=4G" -o $wrk/LOGfiles/SATAC_cor.log -e $wrk/LOGfiles/SATAC_cort.log
+echo -e "$mconda/Rscript $rvat --importAnno --gdb=$gdb --name=SongATAC_astro --value=$wrk/tmp/anno/misc/SongATAC_astro.total1.txt --skipRemap" | qsub -N importAnno_SATACastro -l "h_rt=2:00:00, h_vmem=4G" -o $wrk/LOGfiles/SATAC_astro.log -e $wrk/LOGfiles/SATAC_astro.log
+echo -e "$mconda/Rscript $rvat --importAnno --gdb=$gdb --name=SongATAC_hippo --value=$wrk/tmp/anno/misc/SongATAC_hippo.total1.txt --skipRemap" | qsub -N importAnno_SATAChip -l "h_rt=2:00:00, h_vmem=4G" -o $wrk/LOGfiles/SATAC_hip.log -e $wrk/LOGfiles/SATAC_hip.log
+echo -e "$mconda/Rscript $rvat --importAnno --gdb=$gdb --name=SongATAC_motor --value=$wrk/tmp/anno/misc/SongATAC_motor.total1.txt --skipRemap" | qsub -N importAnno_SATACmot -l "h_rt=2:00:00, h_vmem=4G" -o $wrk/LOGfiles/SATAC_mot.log -e $wrk/LOGfiles/SATAC_mot.log
+```
+
+#select variants for burden analysis
+```{bash}
+units=(SongReg_cort SongReg_hippo SongReg_astro SongReg_motor)
+intersects=(SongATAC_cort SongATAC_hippo SongATAC_astro SongATAC_motor)
+unitnames=(SongReg_cort_gene SongReg_hippo_gene SongReg_astro_gene SongReg_motor_gene)
+weights=(1)
+n=${#units[@]}
+  for ((i=0;i<${n};i++))
+    do
+  unit=${units[$i]}
+  unitname=${unitnames[$i]}
+  weight=${weights[$i]}
+  intersect=${intersects[$i]}
+  echo -e "$mconda/Rscript $rvat --genVarSet --gdb=${gdb} --unitTable=${unit} --unitName=${unitname} --intersection=${intersect} --weightName=1 --output=${resultsFolder}/${unit}.varSet.txt.gz" | qsub  -N varset_gene -l "h_rt=4:00:00, h_vmem=4G, tmpspace=50G" -o $wrk/gene.log -e $wrk/gene.log
+  done 
+```
+
+#distribute variants
+```{bash}
+units=(SongReg_cort SongReg_hippo SongReg_astro SongReg_motor)
+n=${#units[@]}
+
+for ((i=0;i<${n};i++))
+    do
+    unit=${units[$i]}
+    zcat ${resultsFolder}/${unit}.varSet.txt.gz | awk 'BEGIN{FS="|"}$1!=""{print $0}' | awk -v splits=${resultsFolder}/${unit}.varSet 'NR%100==1{out=splits"."++i".txt"}{print > out}'; gzip ${resultsFolder}/${unit}.varSet.*.txt
+    done  
+
+```
+
+#run burden
+```{bash}
+units=(SongReg_cort SongReg_hippo SongReg_astro SongReg_motor)
+n=${#units[@]}
+for ((i=0;i<${n};i++))
+  do
+   unit=${units[$i]}
+   m=$(ls ${resultsFolder}/${unit}.varSet.*.txt.gz | wc -l) 
+   echo -e "$mconda/Rscript $rvat --rvb --gdb=${gdb} --varSet=${resultsFolder}/${unit}.varSet.\${SGE_TASK_ID}.txt.gz --varSetName=${unit} --cohort=${cohort} --pheno=pheno --covar=PC1,PC2,PC3,PC4 --aggregationMethod=allelic --test=burden --maxAF=0.001 --output=${wrk}/burden/${unit}.burden.\${SGE_TASK_ID}.txt.gz &> ${wrk}/burden/${unit}.burden.\${SGE_TASK_ID}.log" | qsub -l "h_rt=90:00:00, h_vmem=8G, tmpspace=50G" -N ${unit} -o /dev/null -e /dev/null -t  1-${m}
+   done
+```
+
+#concatenate results
+```{bash}
+units=(SongReg_cort SongReg_hippo SongReg_astro SongReg_motor)
+n=${#units[@]} 
+for ((i=0;i<${n};i++))
+  do
+    unit=${units[$i]}
+    zcat $wrk/burden/${unit}.burden.*.txt.gz | gzip -c > $wrk/burden/${unit}.burden.txt.gz
+  done
+```
+
+##on laptop
+```{r}
+library(rvat)
+library(ggplot2)
+library(dplyr)
+library(sqldf)
+library(devtools)
+
+as.data.frame(GeneDiscription1.gft)->GeneDiscription
+#SongReg_cort
+SongReg_cort=read.table(gzfile("/Users/charlotte/Documents/Major research project/Geneburden_Songdata/Geneburden_Songdata/Burden_results/SongReg_cort.burden.txt.gz"),h=F,as.is=T,sep="|")
+names(SongReg_cort)=unlist(strsplit("varSetName|unit|pheno|covar|aggregationMethod|test|case|ctrl|caseN|ctrlN|caseMean|ctrlMean|caseMeanGeno|ctrlMeanGeno|caseSdGeno|ctrlSdGeno|OR|ORlower|ORupper|P",split="\\|"))
+
+annoGeneDiscription<-GeneDiscription %>%
+  dplyr::select(seqnames, start, end, strand, gene_name)
+
+names(annoGeneDiscription)=c("CHROM","START","STOP","strand","unit")
+as.numeric(annoGeneDiscription$STOP)->annoGeneDiscription$STOP
+as.numeric(annoGeneDiscription$START)->annoGeneDiscription$START
+annoGeneDiscription$POS=round((annoGeneDiscription$START + annoGeneDiscription$STOP)/2)
+SongReg_cort=sqldf("select * from SongReg_cort left join annoGeneDiscription using (unit)")
+unique(SongReg_cort)->SongReg_cort
+rvat::manhattan(SongReg_cort) 
+rvat::qqplot(SongReg_cort$P[(SongReg_cort$case + SongReg_cort$ctrl)>3],case=max(SongReg_cort$caseN), control=max(SongReg_cort$ctrlN))
+SongReg_cort_sorted <- SongReg_cort[order(SongReg_cort$P),]
+SongReg_cort_sorted
+```
+#songreg_Astro
+```{r}
+SongReg_astro=read.table(gzfile("/Users/charlotte/Documents/Major research project/Geneburden_Songdata/Geneburden_Songdata/Burden_results/SongReg_astro.burden.txt.gz"),h=F,as.is=T,sep="|")
+names(SongReg_astro)=unlist(strsplit("varSetName|unit|pheno|covar|aggregationMethod|test|case|ctrl|caseN|ctrlN|caseMean|ctrlMean|caseMeanGeno|ctrlMeanGeno|caseSdGeno|ctrlSdGeno|OR|ORlower|ORupper|P",split="\\|"))
+SongReg_astro=sqldf("select * from SongReg_astro left join annoGeneDiscription using (unit)")
+unique(SongReg_astro)->SongReg_astro
+rvat::manhattan(SongReg_astro) 
+rvat::qqplot(SongReg_astro$P[(SongReg_astro$case + SongReg_astro$ctrl)>3],case=max(SongReg_astro$caseN), control=max(SongReg_astro$ctrlN))
+SongReg_astro_sorted <- SongReg_astro[order(SongReg_astro$P),]
+SongReg_astro_sorted
+
+```
+
+```{r}
+SongReg_motor=read.table(gzfile("/Users/charlotte/Documents/Major research project/Geneburden_Songdata/Geneburden_Songdata/Burden_results/SongReg_motor.burden.txt.gz"),h=F,as.is=T,sep="|")
+names(SongReg_motor)=unlist(strsplit("varSetName|unit|pheno|covar|aggregationMethod|test|case|ctrl|caseN|ctrlN|caseMean|ctrlMean|caseMeanGeno|ctrlMeanGeno|caseSdGeno|ctrlSdGeno|OR|ORlower|ORupper|P",split="\\|"))
+SongReg_motor=sqldf("select * from SongReg_motor left join annoGeneDiscription using (unit)")
+unique(SongReg_motor)->SongReg_motor
+rvat::manhattan(SongReg_motor)
+rvat::qqplot(SongReg_motor$P[(SongReg_motor$case + SongReg_motor$ctrl)>3],case=max(SongReg_motor$caseN), control=max(SongReg_motor$ctrlN))
+SongReg_motor_sorted <- SongReg_motor[order(SongReg_motor$P),]
+SongReg_motor_sorted
+```
+
+```{r}
+SongReg_hippo=read.table(gzfile("/Users/charlotte/Documents/Major research project/Geneburden_Songdata/Geneburden_Songdata/Burden_results/SongReg_hippo.burden.txt.gz"),h=F,as.is=T,sep="|")
+names(SongReg_hippo)=unlist(strsplit("varSetName|unit|pheno|covar|aggregationMethod|test|case|ctrl|caseN|ctrlN|caseMean|ctrlMean|caseMeanGeno|ctrlMeanGeno|caseSdGeno|ctrlSdGeno|OR|ORlower|ORupper|P",split="\\|"))
+SongReg_hippo=sqldf("select * from SongReg_hippo left join annoGeneDiscription using (unit)")
+unique(SongReg_hippo)->SongReg_hippo
+SongReg_hippo$P[SongReg_hippo$P<(10^-16)]=10^-16
+rvat::manhattan(SongReg_hippo) 
+rvat::qqplot(SongReg_hippo$P[(SongReg_hippo$case + SongReg_hippo$ctrl)>3],case=max(SongReg_hippo$caseN), control=max(SongReg_hippo$ctrlN))
+SongReg_hippo_sorted <- SongReg_hippo[order(SongReg_hippo$P),]
+SongReg_hippo_sorted
+```
+
+##visualize tracks
+```{r}
+library(Gviz)
+library(GenomicRanges)
+library(BSgenome.Hsapiens.UCSC.hg19)
+library(ensembldb)
+library(EnsDb.Hsapiens.v86)
+edb <- EnsDb.Hsapiens.v86
+
+## We have to change the ucscChromosomeNames option to FALSE to enable Gviz usage
+## with non-UCSC chromosome names.
+options(ucscChromosomeNames = FALSE)
+plotTracks(list(gat, GeneRegionTrack(gr)))
+
+genomeGRCh37<-'/Users/charlotte/Documents/Major research project/Challenge1//Homo_sapiens.GRCh37.75.gtf.gz'
+import(genomeGRCh37)->genomeGRCh37
+data(cpgIslands)
+data(geneModels)
+
+grtrack <- GeneRegionTrack(lGeneDiscription_chr7.GR, genome=gen, chromosome=chr, name="Gene Model", symbol = lGeneDiscription_chr7.GR$gene_name, transcriptAnnotation="symbol", background.title="brown")
+
+chr <- as.character(unique(seqnames(cpgIslands)))
+gen <- genome(cpgIslands)
+from <- 4500000
+to <-   5000000
+knownGenes <- UcscTrack(genome=gen, chromosome=chr, track="knownGene",                   trackType="GeneRegionTrack", rstarts="exonStarts", rends="exonEnds", gene="name",                        symbol="name", transcript="name", strand="strand", fill="violetred4", name="UCSC Genes", background.title="brown")
+
+gtrack <- GenomeAxisTrack()
+itrack <- IdeogramTrack(genome=gen, chromosome=chr)
+strack <- SequenceTrack(Hsapiens, chromosome=chr)
+
+ATACTrack <- AnnotationTrack(range=lastror.ATAC_chr7.GR, name="AT", from=from, to=to, chr=chr, background.title="darkgreen", fill="darkgreen")
+EnhancerTrack <- AnnotationTrack(range=lotherends_astro_anno_chr7.GR, name="Enh", from=from, to=to, chr=chr, background.title="darkslateblue", fill="darkslateblue") 
+
+BaitTrack <- AnnotationTrack(range=lbaits_anno_astro_chr7.GR, main="BTS", from=from, to=to, chr=chr, background.title="turquoise4", fill="turquoise4") 
+PromoterTrack <- AnnotationTrack(range=lpromoter20kb.selected.GR_chr7.GR, name="PR", from=from, to=to, chr=chr, background.title="deepskyblue4", fill="deepskyblue4")
+FinalTrack <- AnnotationTrack(range=anno_astro_total_chronly.GR, name="TOT", from=from, to=to, chr=chr, background.title="darkmagenta", fill="darkmagenta")
+
+plotTracks(list(gtrack, itrack, strack, knownGenes, grtrack, ATACTrack, EnhancerTrack, BaitTrack, PromoterTrack, FinalTrack), from=from, to=to, main="astrocytes")
+plotTracks(list(gtrack, itrack, strack, biomTrack, ATACTrack, EnhancerTrack, BaitTrack, PromoterTrack, FinalTrack), from=from, to=to, main="astrocytes")
+
+plotTracks(list(gtrack, itrack, strack, grtrack, EnhancerTrack), from=from, to=to)
+```
+
+#data transformation to be suitable for gviz and make it not crash
+```{r}
+#non-normal chr id's
+P=c(1:22, "X", "Y")
+as.data.frame(anno_astro_total.GR)->X
+Y <- X[which(X$seqnames==P),]
+seqnames(anno_astro_total.GR)->Y
+subset(X,X$seqnames%in%P)->Y
+makeGRangesFromDataFrame(Y, keep.extra.columns = TRUE)->anno_astro_total_chronly.GR
+seqnames(anno_astro_total_chronly.GR)
+seqlevels(anno_astro_total_chronly.GR)<-P
+
+
+#subset to make it not crash
+as.data.frame(astro.ATAC.GR)->astro.ATAC
+(split(astro.ATAC, astro.ATAC$seqnames)->lastro.ATAC)
+lastro.ATAC$`7`->lastro.ATAC_chr7
+makeGRangesFromDataFrame(lastro.ATAC_chr7)->lastror.ATAC_chr7.GR
+
+as.data.frame(promoter20kb.selected.GR)->promoter20kb.selected.GR
+(split(promoter20kb.selected.GR, promoter20kb.selected.GR$seqnames)->lpromoter20kb.selected.GR)
+lpromoter20kb.selected.GR$`7`->lpromoter20kb.selected.GR_chr7
+makeGRangesFromDataFrame(lpromoter20kb.selected.GR_chr7)->lpromoter20kb.selected.GR_chr7.GR
+seqlevels(lpromoter20kb.selected.GR_chr7.GR)<-P
+
+(split(otherends_astro_anno, otherends_astro_anno$seqnames)->lotherends_astro_anno)
+lotherends_astro_anno$`7`->lotherends_astro_anno_chr7
+makeGRangesFromDataFrame(lotherends_astro_anno_chr7)->lotherends_astro_anno_chr7.GR
+seqlevels(lotherends_astro_anno_chr7.GR)<-P
+
+(split(baits_anno_astro, baits_anno_astro$seqnames)->lbaits_anno_astro)
+lbaits_anno_astro$`7`->lbaits_anno_astro_chr7
+makeGRangesFromDataFrame(lbaits_anno_astro_chr7)->lbaits_anno_astro_chr7.GR
+seqlevels(lbaits_anno_astro_chr7.GR)<-P
+
+as.data.frame(GeneDiscription1.gft)->GeneDiscription
+(split(GeneDiscription, GeneDiscription$seqnames)->lGeneDiscription)
+lGeneDiscription$`7`->lGeneDiscription_chr7
+makeGRangesFromDataFrame(lGeneDiscription_chr7, keep.extra.columns = TRUE)->lGeneDiscription_chr7.GR
+seqlevels(lGeneDiscription_chr7.GR)<-P
+unique(lGeneDiscription_chr7.GR)
+GeneDiscription.gft
+```
+
