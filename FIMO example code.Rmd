@@ -1,0 +1,61 @@
+---
+title: "FIMO example code"
+output: html_document
+---
+#needed:
+- for create-priors: http://meme-suite.org/doc/create-priors.html
+    - wiggle file with scores (of ATAC-seq)
+    - Fasta file of the sequences you want to assign a prior score to. In this case the regions of my regulatory network that also    contain an ATAC-seq peak (=narrowed regulatory network)
+    
+- for fimo: http://meme-suite.org/doc/fimo.html?man_type=web 
+    - Priors file from create priors with prior scores for the regions within regulatory network with an ATAC-seq peak
+    - Fasta file in which you want to look for motif occurences
+    - MEME motif format for the motif you want to look for
+    - background file with the background frequences of the four bases (made of entire genome)
+    
+##create priors
+#wiggle file
+```{r}
+#split the narrowed regulatory network per chromosome to maka R Studio not crash and make a new file for every chromosome. 
+(split(Nott_reg_micro_narrowed.df, Nott_reg_micro_narrowed.df$seqnames)->lNott_reg_micro_narrowed.df)
+lNott_reg_micro_narrowed.df$`chr1`->lNott_reg_micro_narrowed_chr_1
+
+#make the individual chromosome files into a wiggle file:
+MakeWig=function(grange1)
+{
+  output=makeGRangesFromDataFrame(grange1, keep.extra.columns = TRUE)->grange; GPos(grange)->grange.GPos;findOverlaps(grange.GPos,grange)->X; grange.GPos[queryHits(X)]->one; grange[subjectHits(X)]->two; one$score<-two$score; unique(one)->one; print(one)
+}
+
+MakeWig(lNott_reg_micro_narrowed_chr_1)->one
+
+#export wiggle file
+export.wig(object=one, con="~/Documents/Nott_reg_micro_narrowed_chr1.wig")
+```
+
+```{bash}
+#Combine the individual chromosome files into one big file but do this in the chromosome order of the FASTA file that you're going to use otherwise create-priors doesn't work
+cat Nott_reg_micro_narrowed_chr*.wig >> Nott_reg_micro_narrowed.wig
+```
+
+#Fasta file
+```{bash}
+#Take the narrowed regulatory network and make it into a fasta file. 
+bedtools getfasta -fi hg19.fa -bed Nott_reg_micro_narrowed.GR  -fo Nott_regnetwork_micro_narrowed.fa
+```
+
+#create-priors command
+```{bash}
+#this will create a folder (Nott_regnetwork_micro_narrowed_CP) that contains the wiggle file with the prior scores and a file containing the prior distribution.
+create-priors --parse-genomic-coord Nott_regnetwork_micro_narrowed.fa ~/Documents/Nott_reg_micro_narrowed1.wig -oc Nott_regnetwork_micro_narrowed_CP 
+```
+
+##FIMO
+```{bash}
+fimo -bfile backgroundmodel -o MA002.2.FIMO_PSP_1 -psp Nott_regnetwork_micro_narrowed_CP/priors.wig  --prior-dist Nott_regnetwork_micro_narrowed_CP/priors.dist JASPAR2020_CORE_vertebrates_non-redundant_pfms_meme/MA0002.2.meme Nott_regnetwork_micro_narrowed.fa 
+#backgroundmodel is based of hg19.fa: 
+fasta-get-markov hg19.fa > backgroundmodel
+#-o is the output file
+#-psp is the wiggle file with the prior scores
+#--prior-dist is the file with the prior distribution
+#the .meme file is the file with the info about the motif
+# the .fa file is the fasta file in which to look for the motifs
