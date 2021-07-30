@@ -1,0 +1,270 @@
+---
+title: "Final ATAC-seq"
+output: html_document
+---
+
+#ATAC-seq files of John, Song, and Nott
+```{bash, eval=FALSE}
+cd /hpc/hers_en/cvandijk/data
+mkdir ATACseq
+
+#John
+files=(merge.summits.ips.con.all_hg19.bed merge.summits.inpc.con.all_hg19.bed merge.summits.ips.als.all_hg19.bed )
+for file in ${files[@]}
+  do 
+    cat Jonathans_data/${file} | sed 's/chr//g'|  awk '{print $1, $2, $3}' | tr " " "\t" >  /hpc/hers_en/cvandijk/data/ATACseq/${file}
+  done
+  
+#Nott  
+files=(Nott_ATAC_micro.peakcall.bed Nott_ATAC_oligo.peakcall.bed Nott_ATAC_neuro.peakcall.bed Nott_ATAC_astro.peakcall.bed)
+for file in ${files[@]}
+  do
+    cat Nott/ATACseq/${file} > /hpc/hers_en/cvandijk/data/ATACseq/${file}
+  done
+  
+#Song
+files=(cortical.ns.bed astrocyte.ns.bed hippocampal.ns.bed motor.ns.bed)
+for file in ${files[@]}
+  do
+    cat Song/ATACpeaks/${file} | awk '{print $1, $2, $3, $4}' | tr " " "\t" >/hpc/hers_en/cvandijk/data/ATACseq/Song_${file}
+  done
+
+#combine
+data=/hpc/hers_en/cvandijk/data
+files=(merge.summits.ips.con.all_hg19.bed merge.summits.inpc.con.all_hg19.bed merge.summits.ips.als.all_hg19.bed ALS52_inpc_idr.optimal_peak.narrowPeak_hg19.bed Nott_ATAC_micro.peakcall.bed Nott_ATAC_oligo.peakcall.bed Nott_ATAC_neuro.peakcall.bed Song_cortical.ns.bed Song_astrocyte.ns.bed Song_hippocampal.ns.bed Song_motor.ns.bed Nott_ATAC_astro.peakcall.bed)
+for file in ${files[@]}
+  do
+    cat $data/ATACseq/${file} >> $data/ATACseq/combined.bed
+  done  
+
+sort -k1,1 -k2,2n $data/ATACseq/combined.bed > $data/ATACseq/combined.srtd.bed
+```
+
+#Give each region a unique ID
+```{bash, eval=FALSE}
+cat $data/ATACseq/combined.srtd.bed | awk '{print $1, $2, $3}'| tr " " "\t"| uniq | awk '{printf  "ATACseq_%d\t%s\n", NR, $0}' | awk '{print $2, $3, $4, $1}' | tr " " "\t" > $data/ATACseq/combined.srtd.anno.bed #1.526.284 regions
+
+bgzip $data/ATACseq/combined.srtd.anno.bed > $data/ATACseq/combined.srtd.anno.bed.gz; tabix -p bed $data/ATACseq/combined.srtd.anno.bed.gz
+```
+
+#upload to gdb
+```{bash, eval=FALSE}
+#config file
+files=(ATACseq_Combined)
+for i in 0
+   do
+   file=${files[$i]}
+   echo -e "
+[[annotation]]
+file='/hpc/hers_en/cvandijk/data/ATACseq/combined.srtd.anno.bed.gz'
+names=['${file}']
+columns=[4]
+ops=['self']
+"
+done > ${wrk}/anno/ATACseq_Combined.config.toml
+
+#vcf anno
+n=11
+echo -e "\
+#!/bin/bash 
+(/hpc/hers_en/kkenna/lib/vcfanno_linux64 -p 4 ${wrk}/anno/ATACseq_Combined.config.toml $wrk/tmp/anno/vcf/${prefix}.\${SLURM_ARRAY_TASK_ID}.vcf.gz | grep -e '#' -e '=' | bgzip -c > $wrk/tmp/anno/misc/${prefix}.\${SLURM_ARRAY_TASK_ID}.vcfAnnoImport.ATACseq_Combined.vcf.gz) &> $wrk/tmp/anno/misc/${prefix}.\${SLURM_ARRAY_TASK_ID}.vcfAnnoImport.ATACseq_Combined.log" | sbatch --time 1:00:00 --mem 1G --job-name vcfAnno_ATACseq_Combined -o /dev/null -e /dev/null --cpus-per-task 8 --array 1-${n}
+
+#make info table real table
+for i in {1..11}
+  do 
+    echo -e "\
+#!/bin/bash
+zcat $wrk/tmp/anno/misc/${prefix}.${i}.vcfAnnoImport.ATACseq_Combined.vcf.gz| $mconda/Rscript $rvat --vcfInfo2Table --vcf=- | sed 's/CHROM\tPOS\tID/CHROM\tPOS\tVAR_id/'> $wrk/tmp/anno/misc/${prefix}.${i}.vcfAnnoImport.ATACseq_Combined.txt" | sbatch --job-name vcfInfo2Table_ATACseq_Combined --time 48:00:00 --mem 1G -o /dev/null -e /dev/null 
+  done
+
+###If you have multiple fields in your info column
+echo -e '
+{
+  "fields":{"ATACseq_Combined":["VAR_id","ATACseq_Combined"]},
+  "ops":{"ATACseq_Combined":["split2row"]},
+  "splitDelimiter":","
+}
+' > $wrk/tmp/anno/vcfInfo2Table_ATACseq_Combined.config.json
+
+#split columns were multiple genes are annotated  
+for i in {1..11}
+  do 
+    echo -e "\
+#!/bin/bash
+$mconda/Rscript /hpc/hers_en/kkenna/lib/miniconda3/lib/R/library/rvat/exec/vcfInfo2Table_parser.R --input=$wrk/tmp/anno/misc/${prefix}.${i}.vcfAnnoImport.ATACseq_Combined.txt --config=$wrk/tmp/anno/vcfInfo2Table_ATACseq_Combined.config.json --output=$wrk/tmp/anno/misc/${prefix}.${i}.ATACseq_Combined.vcfAnnoImport.vcfInfo2Table" | sbatch --time 48:00:00 --mem 1G --job-name vcfInfo2Table_parser_ATACseq_Combined -o /dev/null -e /dev/null
+  done
+
+#combine files
+files=(ATACseq_Combined)
+for file in ${files[@]}
+  do
+    echo -e "VAR_id\t${file}" > $wrk/tmp/anno/misc/${file}.total.txt
+    for i in {1..11}
+      do
+        cat $wrk/tmp/anno/misc/genome.${i}.ATACseq_Combined.vcfAnnoImport.vcfInfo2Table.${file}.txt | tail -n+2 >>$wrk/tmp/anno/misc/${file}.total.txt
+      done
+  done
+
+#make the results table tab delimitated and remove NA values
+for file in ${files[@]}
+  do
+   cat $wrk/tmp/anno/misc/${file}.total.txt |  tr " " "\t" | awk '{if ($2!="NA") print $0}' | uniq > $wrk/tmp/anno/misc/${file}.total1.txt
+  done  
+
+#upload to gdb
+echo -e "\
+#!/bin/bash
+$mconda/Rscript $rvat --importAnno --gdb=$gdb --name=CADD_15 --value=/hpc/hers_en/cvandijk/CADD_15.txt --skipRemap" | sbatch --job-name importAnno_CADD15 --time 2:00:00 --mem 4G --gres=tmpspace:50G -o $wrk/LOGfiles/CADD15.log -e $wrk/LOGfiles/CADD15.log
+```
+
+
+#Mutation counts
+```{bash, eval=FALSE}
+#create index
+echo -e "create index ATACseq_Combined_idx2 on ATACseq_Combined (ATACseq_Combined);" | sqlite3 $gdb
+
+#create mutations per region
+echo -e "select ATACseq_Combined, sum(het+hom) from ATACseq_Combined inner join df2_gtc using (VAR_id) group by ATACseq_Combined;" | sqlite3 $gdb | gzip -c >  ${RegNetworks}/NumberOfMuationsPerATAC.txt.gz
+zcat ${RegNetworks}/NumberOfMuationsPerATAC.txt.gz | tr "|" "\t" | awk '{if ($2>=5) print $1}' > ${RegNetworks}/ListOfRegionsToKeepATAC.txt #1470976
+
+#Linsight >0.8
+echo -e "select ATACseq_Combined, sum(het+hom) from ATACseq_Combined inner join df2_gtc using (VAR_id) inner join Linsight08 using (VAR_id) group by ATACseq_Combined;" | sqlite3 $gdb | gzip -c > ${RegNetworks}/NumberOfMuationsPerATAC_lin08.txt.gz
+zcat ${RegNetworks}/NumberOfMuationsPerATAC_lin08.txt.gz | tr "|" "\t" | awk '{if ($2>=5) print $1}' > ${RegNetworks}/ListOfRegionsToKeepATAC_lin08.txt 
+
+#Linsight >0.24
+echo -e "select ATACseq_Combined, sum(het+hom) from ATACseq_Combined inner join df2_gtc using (VAR_id) inner join Linsight024 using (VAR_id) group by ATACseq_Combined;" | sqlite3 $gdb | gzip -c > ${RegNetworks}/NumberOfMuationsPerATAC_lin024.txt.gz
+zcat ${RegNetworks}/NumberOfMuationsPerATAC_lin024.txt.gz | tr "|" "\t" | awk '{if ($2>=5) print $1}' > ${RegNetworks}/ListOfRegionsToKeepATAC_lin024.txt 
+
+
+#CADD >25
+echo -e "select ATACseq_Combined, sum(het+hom) from ATACseq_Combined inner join df2_gtc using (VAR_id) inner join CADD_25 using (VAR_id) group by ATACseq_Combined;" | sqlite3 $gdb | gzip -c > ${RegNetworks}/NumberOfMuationsPerATAC_cadd25.txt.gz
+zcat ${RegNetworks}/NumberOfMuationsPerATAC_cadd25.txt.gz | tr "|" "\t" | awk '{if ($2>=5) print $1}' > ${RegNetworks}/ListOfRegionsToKeepATAC_cadd25.txt #9456
+
+#CADD >15
+echo -e "select ATACseq_Combined, sum(het+hom) from ATACseq_Combined inner join df2_gtc using (VAR_id) inner join CADD_15 using (VAR_id) group by ATACseq_Combined;" | sqlite3 $gdb | gzip -c > ${RegNetworks}/NumberOfMuationsPerATAC_cadd15.txt.gz
+zcat ${RegNetworks}/NumberOfMuationsPerATAC_cadd15.txt.gz | tr "|" "\t" | awk '{if ($2>=5) print $1}' > ${RegNetworks}/ListOfRegionsToKeepATAC_cadd15.txt
+
+#Linsight >0.8 && CADD > 25
+echo -e "select ATACseq_Combined, sum(het+hom) from ATACseq_Combined inner join df2_gtc using (VAR_id) inner join commCADDLinsight using (VAR_id) group by ATACseq_Combined;" | sqlite3 $gdb | gzip -c > ${RegNetworks}/NumberOfMuationsPerATAC_com.txt.gz
+zcat ${RegNetworks}/NumberOfMuationsPerATAC_com.txt.gz | tr "|" "\t" | awk '{if ($2>=5) print $1}' > ${RegNetworks}/ListOfRegionsToKeepATAC_com.txt #700
+
+#Linsight >0.24 && CADD > 15
+echo -e "select ATACseq_Combined, sum(het+hom) from ATACseq_Combined inner join df2_gtc using (VAR_id) inner join commLin24CADD15 using (VAR_id) group by ATACseq_Combined;" | sqlite3 $gdb | gzip -c > ${RegNetworks}/NumberOfMuationsPerATAC_com2.txt.gz
+zcat ${RegNetworks}/NumberOfMuationsPerATAC_com2.txt.gz | tr "|" "\t" | awk '{if ($2>=5) print $1}' > ${RegNetworks}/ListOfRegionsToKeepATAC_com2.txt #700
+
+```
+
+#varSet
+```{bash, eval=FALSE} 
+#varSet
+units=(ATACseq_Combined)
+#tables=(Linsight08 CADD_25 commCADDLinsight)
+tables=(commLin24CADD15)
+weights=(1 1 1)
+n=${#units[@]}
+for ((i=0;i<${n};i++))
+  do
+  unit=${units[$i]}
+  table=${tables[$i]}
+  weight=${weights[$i]}
+    echo -e "\
+#!/bin/bash
+$mconda/Rscript $rvat --genVarSet --gdb=$gdb --unitTable=${unit} --unitName=${unit} --intersection=${table} --weightName=${weight}  --output=${resultsFolder}/final/${unit}.${table}.txt.gz" | sbatch --time 01:00:00 --mem 1G --job-name ${unit}.${table} -o $wrk/LOGfiles/${unit}.${table}.log -e $wrk/LOGfiles/${unit}.${table}.log 
+  done
+
+#remove the genes with mutation rate <5
+
+for ((i=0;i<${n};i++))
+  do
+  unit=${units[$i]}
+  table=${tables[$i]}
+zcat ${resultsFolder}/final/${unit}.${table}.txt.gz | awk 'BEGIN{FS="|"}$1!=""{print $0}' | awk -v splits=${resultsFolder}/final/${unit}.${table} 'NR%1000==1{out=splits"."++i".txt"}{print > out}'
+gzip ${resultsFolder}/final/${unit}.${table}.*.txt
+ done
+
+names=(lin024 cadd15 com2)
+names=(com2)
+n=${#units[@]}
+for ((i=0;i<${n};i++))
+  do
+   unit=${units[$i]}
+   table=${tables[$i]}
+   name=${names[$i]}
+   m=$(ls ${resultsFolder}/final/${unit}.${table}.*.txt.gz | wc -l) 
+   echo -e "\
+#!/bin/bash
+zcat ${resultsFolder}/final/${unit}.${table}.\${SLURM_ARRAY_TASK_ID}.txt.gz |  grep -wf ${RegNetworks}/ListOfRegionsToKeepATAC_${name}.txt | gzip > ${resultsFolder}/final/${unit}.${table}.final.\${SLURM_ARRAY_TASK_ID}.txt.gz " | sbatch --time  90:00:00 --mem 20G  --gres=tmpspace:50G --job-name ${unit}.${table}.mutrate -o $wrk/LOGfiles/MUTrateATAC -e $wrk/LOGfiles/MUTrateATA --array  1-${m}
+   done
+
+for ((i=0;i<${n};i++))
+  do
+    unit=${units[$i]}
+    table=${tables[$i]}
+    zcat ${resultsFolder}/final/${unit}.${table}.final.*.txt.gz | gzip -c > ${resultsFolder}/final/${unit}.${table}.final.txt.gz
+  done
+
+#remove the genes with mutation rate <5
+
+n=239
+echo -e "\
+#!/bin/bash
+zcat ${resultsFolder}/final/ATACseq_Combined.Linsight08.\${SLURM_ARRAY_TASK_ID}.txt.gz | grep -wf ${RegNetworks}/ListOfRegionsToKeepATAC_lin08.txt | gzip > ${resultsFolder}/final/ATACseq_Combined.Linsight08.final.\${SLURM_ARRAY_TASK_ID}.txt.gz" | sbatch --time 90:00:00 --mem 8G --job-name ATAC -o $wrk/LOGfiles/ATAC.log -e $wrk/LOGfiles/ATAC.log --gres=tmpspace:50G --array  1-${n}
+zcat ${resultsFolder}/final/ATACseq_Combined.Linsight08.final.*.txt.gz >> ${resultsFolder}/final/ATACseq_Combined.Linsight08.final.txt.gz
+
+
+zcat ${resultsFolder}/final/ATACseq_Combined.Linsight08.txt.gz | grep -wf ${RegNetworks}/ListOfRegionsToKeepATAC_lin08.txt | gzip > ${resultsFolder}/final/ATACseq_Combined.Linsight08.final.txt.gz
+
+zcat ${resultsFolder}/final/ATACseq_Combined.CADD_25.txt.gz | grep -wf ${RegNetworks}/ListOfRegionsToKeepATAC_cadd25.txt | gzip >${resultsFolder}/final/ATACseq_Combined.CADD_25.final.txt.gz
+zcat ${resultsFolder}/final/ATACseq_Combined.commCADDLinsight.txt.gz | grep -wf ${RegNetworks}/ListOfRegionsToKeepATAC_com.txt | gzip > ${resultsFolder}/final/ATACseq_Combined.commCADDLinsight.final.txt.gz
+
+
+#devide the varset files in 100 genes per file
+units=(ATACseq_Combined)
+tables=(Linsight08)
+n=${#units[@]}
+for ((i=0;i<${n};i++))
+  do
+    unit=${units[$i]}
+    table=${tables[$i]}
+    weight=${weights[$i]}
+    zcat ${resultsFolder}/final/${unit}.${table}.final.txt.gz | awk 'BEGIN{FS="|"}$1!=""{print $0}' | awk -v splits=${resultsFolder}/final/${unit}.${table} 'NR%100==1{out=splits"."++i".txt"}{print > out}'
+    gzip ${resultsFolder}/final/${unit}.${table}.*.txt
+  done
+```
+
+#Burden testing
+##burden
+```{bash, eval=FALSE}
+units=(ATACseq_Combined)
+tables=(Linsight08)
+n=${#units[@]}
+for ((i=0;i<${n};i++))
+  do
+   unit=${units[$i]}
+   table=${tables[$i]}
+   m=$(ls ${resultsFolder}/final/${unit}.${table}.*.txt.gz | tail -n+2 | wc -l) #tail -n+2 because there is also a file with ${unit}.${table}.final.txt.gz
+   echo -e "\
+#!/bin/bash
+Rscript $rvat2 --rvb --gdb=${gdb} --varSet=${resultsFolder}/final/${unit}.${table}.\${SLURM_ARRAY_TASK_ID}.txt.gz --varSetName=${unit} --cohort=df2 --pheno=pheno --covar=pc1,pc2,pc3,pc4 --aggregationMethod=allelic --test=staaro --maxMAF=0.001 --output=${wrk}/burden/${unit}.${table}.burden.\${SLURM_ARRAY_TASK_ID}.txt.gz &> ${wrk}/burden/${unit}.${table}.burden.\${SLURM_ARRAY_TASK_ID}.log" | sbatch --time  90:00:00 --mem 8G  --gres=tmpspace:50G --job-name ${unit}.${table} -o /dev/null -e /dev/null --array  1-${m}
+   done
+```
+
+#combine
+```{bash}
+units=(ATACseq_Combined)
+tables=(Linsight08)
+n=${#units[@]} 
+for ((i=0;i<${n};i++))
+  do
+    unit=${units[$i]}
+    table=${tables[$i]}
+    zcat $wrk/burden/${unit}.${table}.burden.*.txt.gz | gzip -c > $wrk/burden/${unit}.${table}.burden.txt.gz
+  done
+  
+for ((i=0;i<1000;i++))  
+  do
+  zcat MotorATAC.burden.${i}.txt.gz >> B
+  done
+```
+
+
