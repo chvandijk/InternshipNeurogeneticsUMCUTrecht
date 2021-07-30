@@ -1,4 +1,4 @@
-# InternshipNeurogeneticsUMCUTrecht
+# InternshipNeurogeneticsUMCUtrecht
 
 In this repository are some examples of pipelines that I (co)-developed during my internship at the deparment of neurogenetics (UMC Utrecht).
 
